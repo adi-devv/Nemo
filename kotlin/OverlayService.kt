@@ -9,10 +9,14 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
@@ -20,7 +24,18 @@ import android.widget.*
 class OverlayService : Service() {
 
     private var wm: WindowManager? = null
-    private var root: LinearLayout? = null
+    private var root: View? = null
+
+    // Pending state for outside-tap dismiss
+    private var pendingAmount   = 0.0
+    private var pendingType     = "debit"
+    private var pendingPayeeKey = ""
+    private var pendingHint     = ""
+    private var pendingRef      = ""
+
+    companion object {
+        const val ACTION_TXN_SAVED = "com.hisaab.app.TXN_SAVED"
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -30,133 +45,147 @@ class OverlayService : Service() {
         val payeeKey     = intent?.getStringExtra("payee_key") ?: ""
         val payeeHint    = intent?.getStringExtra("payee_hint") ?: ""
         val refNumber    = intent?.getStringExtra("ref_number") ?: ""
-        val body         = intent?.getStringExtra("body") ?: ""
         val mode         = intent?.getStringExtra("mode") ?: "unknown"
         val merchantName = intent?.getStringExtra("merchant_name") ?: ""
         val category     = intent?.getStringExtra("category") ?: ""
+        val isRefund     = intent?.getBooleanExtra("is_refund", false) ?: false
 
         removeOverlay()
 
-        if (mode == "known") showKnownOverlay(amount, type, merchantName, category, payeeKey, refNumber, body)
-        else showUnknownOverlay(amount, type, payeeKey, payeeHint, refNumber, body)
+        if (mode == "known") {
+            // Save immediately, skip the card, go straight to success popup
+            DatabaseHelper(this).saveTransaction(refNumber, payeeKey, merchantName, category, amount, type)
+            broadcastSaved()
+            showSuccessPopup(amount, type, merchantName, category)
+        } else {
+            // Store for outside-tap fallback
+            pendingAmount   = amount
+            pendingType     = type
+            pendingPayeeKey = payeeKey
+            pendingHint     = payeeHint
+            pendingRef      = refNumber
+            showUnknownOverlay(amount, type, payeeKey, payeeHint, refNumber, isRefund)
+        }
 
         return START_NOT_STICKY
     }
 
-    // ── Known merchant ────────────────────────────────────────────
-
-    private fun showKnownOverlay(
-        amount: Double, type: String,
-        name: String, category: String,
-        payeeKey: String, refNumber: String, body: String
-    ) {
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val isDebit  = type == "debit"
-        val amtColor = if (isDebit) Color.parseColor("#FF453A") else Color.parseColor("#30D158")
-        val prefix   = if (isDebit) "-₹" else "+₹"
-
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background  = card("#1C1C1E", 24f)
-            setPadding(dp(24), dp(20), dp(24), dp(24))
-            alpha = 0f; translationY = dp(40).toFloat()
-        }
-
-        layout.addView(TextView(this).apply {
-            text = "$prefix${fmt(amount)}"
-            textSize = 30f; setTextColor(amtColor)
-            typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-        })
-        layout.addView(TextView(this).apply {
-            text = name; textSize = 16f; setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
-        })
-        layout.addView(TextView(this).apply {
-            text = category; textSize = 13f
-            setTextColor(Color.parseColor("#8E8E93"))
-            gravity = Gravity.CENTER; setPadding(0, dp(2), 0, 0)
-        })
-
-        root = layout
-        wm?.addView(layout, overlayParams(false))
-        animateIn(layout)
-
-        DatabaseHelper(this).saveTransaction(refNumber, payeeKey, name, category, amount, type)
-
-        Handler(Looper.getMainLooper()).postDelayed({
-            animateOut(layout) { removeOverlay(); stopSelf() }
-        }, 3000)
-    }
-
-    // ── Unknown merchant ──────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // UNKNOWN MERCHANT — name + category form (also handles refunds)
+    // ═══════════════════════════════════════════════════════════════
 
     private fun showUnknownOverlay(
         amount: Double, type: String,
         payeeKey: String, payeeHint: String,
-        refNumber: String, body: String
+        refNumber: String, isRefund: Boolean
     ) {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val isDebit  = type == "debit"
         val amtColor = if (isDebit) Color.parseColor("#FF453A") else Color.parseColor("#30D158")
-        val prefix   = if (isDebit) "-₹" else "+₹"
+        val prefix   = if (isDebit) "−₹" else "+₹"
 
         val db          = DatabaseHelper(this)
         val topCats     = db.getTopCategories()
-        val defaults    = listOf("Food", "Commute", "Shopping", "Misc")
-        val seen        = mutableSetOf<String>()
-        val orderedCats = mutableListOf<String>()
-        for (cat in topCats + defaults) {
-            if (seen.add(cat)) orderedCats.add(cat)
-            if (orderedCats.size == 5) break
+        // getTopCategories() already returns: frequency-sorted + all defaults + user cats + Misc last
+        // Just cap visible chips at 6 (rest accessible via + Other / scrolling)
+        val orderedCats = topCats
+
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            alpha        = 0f
+            translationY = dp(40).toFloat()
+        }
+
+        // ── Intercept outside touches to save as pending ──────────
+        scroll.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                savePending()
+                animateOut(scroll) { removeOverlay(); stopSelf() }
+                true
+            } else false
         }
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background  = card("#1C1C1E", 28f)
-            setPadding(dp(24), dp(24), dp(24), dp(28))
-            alpha = 0f; translationY = dp(40).toFloat()
+            background  = blurCard()
+            setPadding(dp(22), dp(22), dp(22), dp(26))
         }
+        scroll.addView(layout)
 
-        layout.addView(TextView(this).apply {
-            text = "$prefix${fmt(amount)}"
-            textSize = 34f; setTextColor(amtColor)
-            typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-        })
-        // Show payee hint as subtitle so user knows who it is
-        if (payeeHint.isNotBlank()) {
+        // ── Refund badge ─────────────────────────────────────────
+        if (isRefund) {
             layout.addView(TextView(this).apply {
-                text = payeeHint; textSize = 13f
-                setTextColor(Color.parseColor("#636366"))
-                gravity = Gravity.CENTER; setPadding(0, dp(4), 0, dp(12))
+                text          = "↩  Looks like a refund"
+                textSize      = 11.5f
+                letterSpacing = 0.02f
+                setTextColor(Color.parseColor("#30D158"))
+                background    = pillBg(Color.parseColor("#0D2B1A"), Color.parseColor("#1C4D2E"))
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                layoutParams  = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 0, 0, dp(14)) }
             })
         }
 
-        layout.addView(label("What's this called?"))
+        // ── Amount ───────────────────────────────────────────────
+        layout.addView(TextView(this).apply {
+            text     = "$prefix${fmt(amount)}"
+            textSize = 32f
+            setTextColor(amtColor)
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            gravity  = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(20)) }
+        })
+
+        // ── Name field ───────────────────────────────────────────
+        layout.addView(fieldLabel("Name"))
         val nameInput = EditText(this).apply {
-            setText(payeeHint) // pre-fill with payee hint
+            setText(payeeHint)
             setSelectAllOnFocus(true)
-            setHintTextColor(Color.parseColor("#48484A"))
-            setTextColor(Color.WHITE); textSize = 15f
-            background = card("#2C2C2E", 12f)
-            setPadding(dp(16), dp(14), dp(16), dp(14)); setSingleLine(true)
+            hint              = "e.g. Swiggy"
+            setHintTextColor(Color.parseColor("#3A3A3C"))
+            setTextColor(Color.WHITE)
+            textSize          = 14f
+            background        = inputBg()
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(6), 0, dp(18)) }
         }
         layout.addView(nameInput)
 
-        layout.addView(label("Category").apply { setPadding(0, dp(16), 0, dp(8)) })
+        // ── Category chips ───────────────────────────────────────
+        layout.addView(fieldLabel("Category"))
 
+        val chipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(6), 0, 0) }
+        }
         val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        layout.addView(chipRow)
+        chipScroll.addView(chipRow)
+        layout.addView(chipScroll)
 
         val customInput = EditText(this).apply {
-            hint = "Type category…"
-            setHintTextColor(Color.parseColor("#48484A"))
-            setTextColor(Color.WHITE); textSize = 14f
-            background = card("#2C2C2E", 12f)
-            setPadding(dp(16), dp(12), dp(16), dp(12)); setSingleLine(true)
-            visibility = android.view.View.GONE
+            hint              = "Type custom category…"
+            setHintTextColor(Color.parseColor("#3A3A3C"))
+            setTextColor(Color.WHITE)
+            textSize          = 14f
+            background        = inputBg()
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setSingleLine(true)
+            visibility        = View.GONE
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { setMargins(0, dp(10), 0, 0) }
         }
         layout.addView(customInput)
@@ -165,121 +194,330 @@ class OverlayService : Service() {
         val chips = mutableListOf<TextView>()
 
         fun selectChip(index: Int) {
-            for (i in chips.indices) {
-                chips[i].background = card(if (i == index) "#FFFFFF" else "#2C2C2E", 20f)
-                chips[i].setTextColor(if (i == index) Color.BLACK else Color.parseColor("#8E8E93"))
+            chips.forEachIndexed { i, chip ->
+                chip.background = chipBg(i == index)
+                chip.setTextColor(if (i == index) Color.BLACK else Color.parseColor("#8E8E93"))
             }
         }
 
-        for (idx in orderedCats.indices) {
-            val catName = orderedCats[idx]
+        orderedCats.forEachIndexed { idx, catName ->
             val chip = TextView(this).apply {
-                text = catName; textSize = 12f
-                setPadding(dp(12), dp(8), dp(12), dp(8))
+                text      = catName
+                textSize  = 12.5f
+                setPadding(dp(14), dp(8), dp(14), dp(8))
                 setTextColor(if (idx == 0) Color.BLACK else Color.parseColor("#8E8E93"))
-                background = card(if (idx == 0) "#FFFFFF" else "#2C2C2E", 20f)
+                background = chipBg(idx == 0)
                 layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins(0, 0, dp(8), 0) }
                 setOnClickListener {
-                    selectedCategory = catName
-                    customInput.visibility = android.view.View.GONE
+                    selectedCategory       = catName
+                    customInput.visibility = View.GONE
                     selectChip(idx)
                 }
             }
-            chips.add(chip); chipRow.addView(chip)
+            chips.add(chip)
+            chipRow.addView(chip)
         }
 
         chipRow.addView(TextView(this).apply {
-            text = "+ Add"; textSize = 12f
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            setTextColor(Color.parseColor("#8E8E93"))
-            background = card("#2C2C2E", 20f)
+            text      = "+ Other"
+            textSize  = 12.5f
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setTextColor(Color.parseColor("#636366"))
+            background = chipBg(false)
             setOnClickListener {
-                customInput.visibility = android.view.View.VISIBLE
+                customInput.visibility = View.VISIBLE
                 customInput.requestFocus()
-                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                imm.showSoftInput(customInput, InputMethodManager.SHOW_IMPLICIT)
-                for (c in chips) {
-                    c.background = card("#2C2C2E", 20f)
+                showKeyboard(customInput)
+                chips.forEach { c ->
+                    c.background = chipBg(false)
                     c.setTextColor(Color.parseColor("#8E8E93"))
                 }
                 selectedCategory = ""
             }
         })
 
-        layout.addView(android.view.View(this).apply {
+        // ── Divider ──────────────────────────────────────────────
+        layout.addView(View(this).apply {
+            setBackgroundColor(Color.parseColor("#1F1F1F"))
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
-            ).apply { setMargins(0, dp(20), 0, 0) }
-            setBackgroundColor(Color.parseColor("#2C2C2E"))
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+            ).apply { setMargins(0, dp(22), 0, 0) }
         })
 
+        // ── Action row ───────────────────────────────────────────
         val btnRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            orientation = LinearLayout.HORIZONTAL
+            gravity     = Gravity.CENTER_VERTICAL
             setPadding(0, dp(16), 0, 0)
         }
+
+        // Skip → save as pending
         btnRow.addView(TextView(this).apply {
-            text = "Skip"; textSize = 15f
-            setTextColor(Color.parseColor("#48484A")); setPadding(0, 0, dp(32), 0)
-            setOnClickListener { animateOut(layout) { removeOverlay(); stopSelf() } }
-        })
-        btnRow.addView(TextView(this).apply {
-            text = "  Save  "; textSize = 15f; typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.BLACK); background = card("#FFFFFF", 22f)
-            setPadding(dp(28), dp(14), dp(28), dp(14))
+            text     = "Skip"
+            textSize = 14f
+            setTextColor(Color.parseColor("#48484A"))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener {
-                val name = nameInput.text.toString().trim()
-                if (name.isEmpty()) { nameInput.hint = "Please enter a name"; return@setOnClickListener }
-                if (customInput.visibility == android.view.View.VISIBLE) {
-                    val custom = customInput.text.toString().trim()
-                    if (custom.isNotEmpty()) selectedCategory = custom
-                }
-                if (selectedCategory.isEmpty()) selectedCategory = "Misc"
-                val dbHelper = DatabaseHelper(this@OverlayService)
-                dbHelper.saveMerchant(payeeKey, name, selectedCategory)
-                dbHelper.saveTransaction(refNumber, payeeKey, name, selectedCategory, amount, type)
-                animateOut(layout) { removeOverlay(); stopSelf() }
+                savePending()
+                animateOut(scroll) { removeOverlay(); stopSelf() }
             }
         })
+
+        val saveBtn = TextView(this).apply {
+            text      = "Save"
+            textSize  = 14f
+            typeface  = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(Color.BLACK)
+            background = roundRect("#FFFFFF", 22f)
+            setPadding(dp(26), dp(12), dp(26), dp(12))
+        }
+        btnRow.addView(saveBtn)
         layout.addView(btnRow)
 
-        root = layout
-        wm?.addView(layout, overlayParams(true))
-        animateIn(layout)
+        saveBtn.setOnClickListener {
+            val name = nameInput.text.toString().trim()
+            if (name.isEmpty()) { nameInput.hint = "Please enter a name"; return@setOnClickListener }
+            if (customInput.visibility == View.VISIBLE) {
+                val custom = customInput.text.toString().trim()
+                if (custom.isNotEmpty()) selectedCategory = custom
+            }
+            if (selectedCategory.isEmpty()) selectedCategory = "Misc"
+
+            val dbHelper = DatabaseHelper(this@OverlayService)
+            dbHelper.saveMerchant(payeeKey, name, selectedCategory)
+            dbHelper.saveTransaction(refNumber, payeeKey, name, selectedCategory, amount, type,
+                status = "confirmed")
+            broadcastSaved()
+
+            hideKeyboard(nameInput)
+            animateOut(scroll) {
+                removeOverlay()
+                showSuccessPopup(amount, type, name, selectedCategory)
+            }
+        }
+
+        root = scroll
+        wm?.addView(scroll, overlayParams(focusable = true))
+        animateIn(scroll)
 
         Handler(Looper.getMainLooper()).postDelayed({
             nameInput.requestFocus()
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(nameInput, InputMethodManager.SHOW_IMPLICIT)
-        }, 400)
+            showKeyboard(nameInput)
+        }, 380)
     }
 
-    // ── Animations ────────────────────────────────────────────────
+    // Save current transaction as pending (used by Skip and outside-tap)
+    private fun savePending() {
+        if (pendingRef.isBlank()) return
+        DatabaseHelper(this).saveTransaction(
+            pendingRef, pendingPayeeKey,
+            pendingHint.ifBlank { pendingPayeeKey }, "Uncategorised",
+            pendingAmount, pendingType, status = "pending"
+        )
+        broadcastSaved()
+        pendingRef = "" // prevent double-save
+    }
 
-    private fun animateIn(view: android.view.View) {
-        val alpha = ObjectAnimator.ofFloat(view, "alpha", 0f, 1f).apply { duration = 280 }
-        val slide = ObjectAnimator.ofFloat(view, "translationY", dp(40).toFloat(), 0f).apply {
-            duration = 320
-            interpolator = android.view.animation.DecelerateInterpolator(2f)
+    // Broadcast so Flutter can reload the list
+    private fun broadcastSaved() {
+        sendBroadcast(Intent(ACTION_TXN_SAVED).setPackage(packageName))
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SUCCESS POPUP — dot animates to tick after 1.5s, then dismisses
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun showSuccessPopup(
+        amount: Double, type: String,
+        name: String, category: String
+    ) {
+        val wm2      = getSystemService(WINDOW_SERVICE) as WindowManager
+        val isDebit  = type == "debit"
+        val amtColor = if (isDebit) Color.parseColor("#FF453A") else Color.parseColor("#30D158")
+        val prefix   = if (isDebit) "−₹" else "+₹"
+
+        val pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity     = Gravity.CENTER_VERTICAL
+            background  = blurCard()
+            setPadding(dp(18), dp(14), dp(20), dp(14))
+            alpha        = 0f
+            translationY = dp(28).toFloat()
+        }
+
+        // Dot indicator — starts as colored dot, becomes ✓
+        val dotView = TextView(this).apply {
+            text     = ""  // empty — dot drawn as background
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                setMargins(0, 0, dp(12), 0)
+            }
+            background = circle(amtColor)
+        }
+        pill.addView(dotView)
+
+        // Text column
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        col.addView(TextView(this).apply {
+            text     = name
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        })
+        col.addView(TextView(this).apply {
+            text     = category
+            textSize = 11f
+            setTextColor(Color.parseColor("#636366"))
+            setPadding(0, dp(2), 0, 0)
+        })
+        pill.addView(col)
+
+        // Amount
+        pill.addView(TextView(this).apply {
+            text     = "$prefix${fmt(amount)}"
+            textSize = 15f
+            setTextColor(amtColor)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setPadding(dp(12), 0, 0, 0)
+        })
+
+        wm2.addView(pill, overlayParams(focusable = false))
+        animateIn(pill)
+
+        // After 1.5s — morph dot into ✓
+        Handler(Looper.getMainLooper()).postDelayed({
+            // Shrink dot out
+            val shrink = ObjectAnimator.ofFloat(dotView, "scaleX", 1f, 0f).apply { duration = 150 }
+            val shrinkY = ObjectAnimator.ofFloat(dotView, "scaleY", 1f, 0f).apply { duration = 150 }
+            AnimatorSet().apply {
+                playTogether(shrink, shrinkY)
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(a: android.animation.Animator) {
+                        // Swap to tick
+                        dotView.text       = "✓"
+                        dotView.textSize   = 11f
+                        dotView.setTextColor(Color.parseColor("#30D158"))
+                        dotView.background = null
+                        dotView.layoutParams = (dotView.layoutParams as LinearLayout.LayoutParams).also {
+                            it.width  = ViewGroup.LayoutParams.WRAP_CONTENT
+                            it.height = ViewGroup.LayoutParams.WRAP_CONTENT
+                        }
+                        // Grow tick in
+                        dotView.scaleX = 0f
+                        dotView.scaleY = 0f
+                        val growX = ObjectAnimator.ofFloat(dotView, "scaleX", 0f, 1f).apply { duration = 180 }
+                        val growY = ObjectAnimator.ofFloat(dotView, "scaleY", 0f, 1f).apply { duration = 180 }
+                        AnimatorSet().apply {
+                            playTogether(growX, growY)
+                            interpolator = android.view.animation.OvershootInterpolator(2f)
+                            start()
+                        }
+                    }
+                })
+                start()
+            }
+        }, 1500)
+
+        // After 1.5s dot anim + 1s hold = 2.5s total, then dismiss
+        Handler(Looper.getMainLooper()).postDelayed({
+            animateOut(pill) {
+                pill.visibility = View.INVISIBLE
+                try { wm2.removeView(pill) } catch (_: Exception) {}
+                stopSelf()
+            }
+        }, 2800)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ANIMATIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun animateIn(view: View) {
+        val alpha = ObjectAnimator.ofFloat(view, "alpha", 0f, 1f).apply { duration = 260 }
+        val slide = ObjectAnimator.ofFloat(view, "translationY",
+            view.translationY, 0f).apply {
+            duration     = 320
+            interpolator = android.view.animation.DecelerateInterpolator(2.2f)
         }
         AnimatorSet().apply { playTogether(alpha, slide); start() }
     }
 
-    private fun animateOut(view: android.view.View, onEnd: () -> Unit) {
-        val alpha = ObjectAnimator.ofFloat(view, "alpha", 1f, 0f).apply { duration = 200 }
-        val slide = ObjectAnimator.ofFloat(view, "translationY", 0f, dp(30).toFloat()).apply { duration = 200 }
+    private fun animateOut(view: View, onEnd: () -> Unit) {
+        val alpha = ObjectAnimator.ofFloat(view, "alpha", 1f, 0f).apply { duration = 190 }
+        val slide = ObjectAnimator.ofFloat(view, "translationY", 0f,
+            dp(24).toFloat()).apply { duration = 190 }
         AnimatorSet().apply {
             playTogether(alpha, slide)
             addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) { onEnd() }
+                override fun onAnimationEnd(a: android.animation.Animator) { onEnd() }
             })
             start()
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // DRAWABLES / HELPERS
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun blurCard(): android.graphics.drawable.Drawable {
+        val bg = GradientDrawable().apply {
+            setColor(Color.parseColor("#0F0F0F"))
+            cornerRadius = dp(20).toFloat()
+        }
+        val stroke = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = dp(20).toFloat()
+            setStroke(dp(1), Color.parseColor("#232323"))
+        }
+        return LayerDrawable(arrayOf(bg, stroke))
+    }
+
+    private fun inputBg() = GradientDrawable().apply {
+        setColor(Color.parseColor("#161616"))
+        cornerRadius = dp(10).toFloat()
+        setStroke(dp(1), Color.parseColor("#2A2A2A"))
+    }
+
+    private fun chipBg(selected: Boolean) = GradientDrawable().apply {
+        setColor(if (selected) Color.WHITE else Color.parseColor("#1A1A1A"))
+        cornerRadius = dp(20).toFloat()
+        if (!selected) setStroke(dp(1), Color.parseColor("#2C2C2E"))
+    }
+
+    private fun roundRect(hex: String, radius: Float) = GradientDrawable().apply {
+        setColor(Color.parseColor(hex))
+        cornerRadius = radius * resources.displayMetrics.density
+    }
+
+    private fun circle(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+    }
+
+    private fun pillBg(fillColor: Int, borderColor: Int): android.graphics.drawable.Drawable {
+        val bg = GradientDrawable().apply {
+            setColor(fillColor)
+            cornerRadius = dp(20).toFloat()
+        }
+        val border = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = dp(20).toFloat()
+            setStroke(dp(1), borderColor)
+        }
+        return LayerDrawable(arrayOf(bg, border))
+    }
+
+    private fun fieldLabel(text: String) = TextView(this).apply {
+        this.text     = text
+        textSize      = 11f
+        letterSpacing = 0.04f
+        setTextColor(Color.parseColor("#505055"))
+    }
 
     private fun overlayParams(focusable: Boolean) = WindowManager.LayoutParams(
         WindowManager.LayoutParams.MATCH_PARENT,
@@ -287,20 +525,13 @@ class OverlayService : Service() {
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         if (focusable)
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         else
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
         PixelFormat.TRANSLUCENT
-    ).apply { gravity = Gravity.BOTTOM; y = dp(16) }
-
-    private fun card(hex: String, radius: Float) = GradientDrawable().apply {
-        setColor(Color.parseColor(hex))
-        cornerRadius = radius * resources.displayMetrics.density
-    }
-
-    private fun label(text: String) = TextView(this).apply {
-        this.text = text; textSize = 12f
-        setTextColor(Color.parseColor("#636366")); letterSpacing = 0.05f
+    ).apply {
+        gravity = Gravity.BOTTOM
+        y = dp(20)
     }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -309,8 +540,22 @@ class OverlayService : Service() {
         if (amount == amount.toLong().toDouble()) amount.toLong().toString()
         else String.format("%.2f", amount)
 
+    private fun showKeyboard(v: View) {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun hideKeyboard(v: View) {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(v.windowToken, 0)
+    }
+
     private fun removeOverlay() {
-        root?.let { try { wm?.removeView(it) } catch (_: Exception) {}; root = null }
+        root?.let {
+            it.visibility = View.INVISIBLE
+            try { wm?.removeView(it) } catch (_: Exception) {}
+            root = null
+        }
     }
 
     override fun onDestroy() { removeOverlay(); super.onDestroy() }

@@ -23,7 +23,6 @@ class SmsBroadcastReceiver : BroadcastReceiver() {
 
         val parsed = SmsParser.parse(body) ?: return
 
-        // Deduplicate — skip if ref already saved
         val db = DatabaseHelper(context)
         if (db.refExists(parsed.refNumber)) return
 
@@ -36,6 +35,7 @@ class SmsBroadcastReceiver : BroadcastReceiver() {
             putExtra("payee_hint",    parsed.payeeHint)
             putExtra("ref_number",    parsed.refNumber)
             putExtra("body",          body)
+            putExtra("is_refund",     parsed.isRefund)
             if (merchant != null) {
                 putExtra("mode",          "known")
                 putExtra("merchant_name", merchant.first)
