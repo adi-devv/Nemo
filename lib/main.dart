@@ -320,13 +320,15 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _txns   = [];
   Map<String, double>        _totals = {};
-  String  _range            = 'This Month';
-  String? _selectedCategory;
-  int?    _expandedTxnId;
-  bool    _loading          = true;
-  bool    _showPie          = true;
+  String     _range            = 'This Month';
+  String?    _selectedCategory;
+  int?       _expandedTxnId;
+  bool       _loading          = true;
+  bool       _showPie          = true;
+  DateTime?  _customFrom;
+  DateTime?  _customTo;
 
-  final _ranges = ['This Week', 'This Month', 'Last Month', 'All Time'];
+  final _ranges = ['This Week', 'This Month', 'Last Month', 'All Time', 'Custom'];
 
   @override
   void initState() {
@@ -356,8 +358,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       'Last Month' => (
       DateTime(now.year, now.month - 1, 1).millisecondsSinceEpoch.toString(),
       DateTime(now.year, now.month, 1).millisecondsSinceEpoch.toString()),
+      'Custom' => (
+      _customFrom?.millisecondsSinceEpoch.toString(),
+      _customTo != null
+          ? DateTime(_customTo!.year, _customTo!.month, _customTo!.day + 1)
+          .millisecondsSinceEpoch.toString()
+          : null,
+      ),
       _ => (null, null),
     };
+  }
+
+  // Label shown in the header button when Custom is active
+  String get _rangeLabel {
+    if (_range == 'Custom' && _customFrom != null) {
+      final f = _customFrom!;
+      final t = _customTo ?? _customFrom!;
+      const months = ['Jan','Feb','Mar','Apr','May','Jun',
+        'Jul','Aug','Sep','Oct','Nov','Dec'];
+      if (f.year == t.year && f.month == t.month && f.day == t.day) {
+        return '${f.day} ${months[f.month - 1]}';
+      }
+      if (f.year == t.year) {
+        return '${f.day} ${months[f.month - 1]} \u2013 ${t.day} ${months[t.month - 1]}';
+      }
+      return '${f.day} ${months[f.month - 1]} ${f.year} \u2013 ${t.day} ${months[t.month - 1]} ${t.year}';
+    }
+    return _range;
   }
 
   Future<void> _load() async {
@@ -385,7 +412,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _selectedCategory = _selectedCategory == cat ? null : cat;
       _expandedTxnId    = null;
     });
-    _loadTxns(); // only reload transactions, not totals
+    _loadTxns();
   }
 
   void _toggleTxn(int id) {
@@ -442,7 +469,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Text(_range, style: TextStyle(fontSize: 12,
+                        Text(_rangeLabel, style: TextStyle(fontSize: 12,
                             color: Colors.white.withOpacity(0.5), letterSpacing: 0.2)),
                         const SizedBox(width: 4),
                         Icon(Icons.expand_more, size: 14,
@@ -455,13 +482,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
 
             // ── Total amount ──
-            if (!_loading && _totals.isNotEmpty)
+            if (!_loading)
               Padding(
                 padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-                child: Text('₹${_fmt(_spent)}',
-                    style: const TextStyle(fontSize: 40,
-                        fontWeight: FontWeight.w200,
-                        color: Colors.white, letterSpacing: -1.5)),
+                child: Text(
+                  _totals.isNotEmpty ? '₹${_fmt(_spent)}' : '—',
+                  style: TextStyle(
+                      fontSize: 40,
+                      fontWeight: FontWeight.w200,
+                      color: _totals.isNotEmpty
+                          ? Colors.white
+                          : Colors.white.withOpacity(0.15),
+                      letterSpacing: -1.5),
+                ),
               ),
 
             // ── Fixed chart (pie or bars) ──
@@ -487,6 +520,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     : const SizedBox.shrink(),
               ),
 
+            // ── Sticky "RECENT" label ──
+            if (!_loading && _txns.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 24, 24, 12),
+                child: Text('RECENT', style: TextStyle(
+                    fontSize: 11, letterSpacing: 2,
+                    color: Colors.white.withOpacity(0.2),
+                    fontWeight: FontWeight.w600)),
+              ),
+
             // ── Scrollable transactions ──
             Expanded(
               child: _loading
@@ -501,19 +544,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     style: TextStyle(color: Colors.white.withOpacity(0.2),
                         fontSize: 15)))
                     : ListView.builder(
-                  padding: const EdgeInsets.only(top: 24, bottom: 48),
-                  itemCount: _txns.length + 1,
+                  padding: const EdgeInsets.only(top: 0, bottom: 48),
+                  itemCount: _txns.length,
                   itemBuilder: (_, i) {
-                    if (i == 0) {
-                      return Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-                        child: Text('RECENT', style: TextStyle(
-                            fontSize: 11, letterSpacing: 2,
-                            color: Colors.white.withOpacity(0.2),
-                            fontWeight: FontWeight.w600)),
-                      );
-                    }
-                    final txn = _txns[i - 1];
+                    final txn = _txns[i];
                     final id  = txn['id'] as int;
                     return _TxnTile(
                       txn: txn, expanded: _expandedTxnId == id,
@@ -535,31 +569,446 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       backgroundColor: const Color(0xFF1C1C1E),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Padding(
+      builder: (sheetCtx) => Padding(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 40),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(width: 36, height: 4,
               decoration: BoxDecoration(color: Colors.white24,
                   borderRadius: BorderRadius.circular(2))),
           const SizedBox(height: 20),
-          ..._ranges.map((r) => GestureDetector(
-            onTap: () { setState(() => _range = r); Navigator.pop(context); _load(); },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(
-                      color: Colors.white.withOpacity(0.06)))),
-              child: Row(children: [
-                Expanded(child: Text(r, style: TextStyle(
-                    color: r == _range ? Colors.white : Colors.white.withOpacity(0.45),
-                    fontSize: 16,
-                    fontWeight: r == _range ? FontWeight.w500 : FontWeight.normal))),
-                if (r == _range) const Icon(Icons.check, color: Colors.white, size: 16),
-              ]),
-            ),
-          )),
+          ..._ranges.map((r) {
+            final isCurrent = r == _range;
+            return GestureDetector(
+              onTap: () async {
+                if (r == 'Custom') {
+                  Navigator.pop(sheetCtx);
+                  final now = DateTime.now();
+                  final picked = await showDialog<DateTimeRange>(
+                    context: context,
+                    builder: (_) => _DateRangeDialog(
+                      initial: (_customFrom != null && _customTo != null)
+                          ? DateTimeRange(start: _customFrom!, end: _customTo!)
+                          : DateTimeRange(
+                          start: DateTime(now.year, now.month, 1),
+                          end: now),
+                      firstDate: DateTime(now.year - 3),
+                      lastDate: now,
+                    ),
+                  );
+                  if (picked == null) return;
+
+                  setState(() {
+                    _range      = 'Custom';
+                    _customFrom = picked.start;
+                    _customTo   = picked.end;
+                  });
+                  _load();
+                } else {
+                  setState(() => _range = r);
+                  Navigator.pop(sheetCtx);
+                  _load();
+                }
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(
+                        color: Colors.white.withOpacity(0.06)))),
+                child: Row(children: [
+                  Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(r, style: TextStyle(
+                          color: isCurrent ? Colors.white : Colors.white.withOpacity(0.45),
+                          fontSize: 16,
+                          fontWeight: isCurrent ? FontWeight.w500 : FontWeight.normal)),
+                      // Show selected custom range below the label
+                      if (r == 'Custom' && _range == 'Custom' && _customFrom != null) ...[
+                        const SizedBox(height: 3),
+                        Text(_rangeLabel,
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.35),
+                                fontSize: 12)),
+                      ],
+                    ],
+                  )),
+                  if (isCurrent) const Icon(Icons.check, color: Colors.white, size: 16)
+                  else if (r == 'Custom')
+                    Icon(Icons.calendar_today_outlined, size: 14,
+                        color: Colors.white.withOpacity(0.25)),
+                ]),
+              ),
+            );
+          }),
         ]),
+      ),
+    );
+  }
+
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COMPACT DATE RANGE DIALOG
+// ══════════════════════════════════════════════════════════════════
+
+class _DateRangeDialog extends StatefulWidget {
+  final DateTimeRange initial;
+  final DateTime firstDate;
+  final DateTime lastDate;
+  const _DateRangeDialog({
+    required this.initial,
+    required this.firstDate,
+    required this.lastDate,
+  });
+
+  @override
+  State<_DateRangeDialog> createState() => _DateRangeDialogState();
+}
+
+class _DateRangeDialogState extends State<_DateRangeDialog> {
+  late DateTime _viewMonth; // which month is displayed
+  DateTime? _from;
+  DateTime? _to;
+  bool _pickingFrom = true; // true = next tap sets from, false = sets to
+
+  @override
+  void initState() {
+    super.initState();
+    _from      = widget.initial.start;
+    _to        = widget.initial.end;
+    _viewMonth = DateTime(widget.initial.end.year, widget.initial.end.month);
+  }
+
+  static const _mo = ['Jan','Feb','Mar','Apr','May','Jun',
+    'Jul','Aug','Sep','Oct','Nov','Dec'];
+  static const _wd = ['M','T','W','T','F','S','S'];
+
+  bool _canApply() => _from != null && _to != null && !_to!.isBefore(_from!);
+
+  void _onDayTap(DateTime d) {
+    setState(() {
+      if (_pickingFrom) {
+        _from      = d;
+        _to        = null;
+        _pickingFrom = false;
+      } else {
+        if (d.isBefore(_from!)) {
+          // Tapped earlier than from — restart
+          _from      = d;
+          _to        = null;
+        } else {
+          _to        = d;
+          _pickingFrom = true;
+        }
+      }
+    });
+  }
+
+  bool _inRange(DateTime d) {
+    if (_from == null || _to == null) return false;
+    return !d.isBefore(_from!) && !d.isAfter(_to!);
+  }
+
+  bool _isFrom(DateTime d) =>
+      _from != null && _isSameDay(d, _from!);
+
+  bool _isTo(DateTime d) =>
+      _to != null && _isSameDay(d, _to!);
+
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  bool _isToday(DateTime d) => _isSameDay(d, DateTime.now());
+
+  bool _isDisabled(DateTime d) =>
+      d.isBefore(widget.firstDate) || d.isAfter(widget.lastDate);
+
+  String _fmtChip(DateTime? d) {
+    if (d == null) return '—';
+    return '${d.day} ${_mo[d.month - 1]} ${d.year}';
+  }
+
+  void _prevMonth() {
+    setState(() {
+      _viewMonth = DateTime(_viewMonth.year, _viewMonth.month - 1);
+    });
+  }
+
+  void _nextMonth() {
+    final next = DateTime(_viewMonth.year, _viewMonth.month + 1);
+    if (next.isAfter(DateTime(widget.lastDate.year, widget.lastDate.month))) return;
+    setState(() { _viewMonth = next; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Build the day grid
+    final firstOfMonth = DateTime(_viewMonth.year, _viewMonth.month, 1);
+    // Monday = 0 offset
+    final startOffset  = (firstOfMonth.weekday - 1) % 7;
+    final daysInMonth  = DateTime(_viewMonth.year, _viewMonth.month + 1, 0).day;
+    final totalCells   = startOffset + daysInMonth;
+    final rows         = (totalCells / 7).ceil();
+
+    return Dialog(
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+
+            // ── From / To chips ──
+            Row(children: [
+              _RangeChip(
+                label: 'FROM',
+                value: _fmtChip(_from),
+                active: _pickingFrom,
+                onTap: () => setState(() => _pickingFrom = true),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Icon(Icons.arrow_forward,
+                    size: 14, color: Colors.white.withOpacity(0.2)),
+              ),
+              _RangeChip(
+                label: 'TO',
+                value: _fmtChip(_to),
+                active: !_pickingFrom,
+                onTap: () => setState(() { _pickingFrom = false; }),
+              ),
+            ]),
+
+            const SizedBox(height: 18),
+
+            // ── Month nav ──
+            Row(children: [
+              GestureDetector(
+                onTap: _prevMonth,
+                child: Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(Icons.chevron_left,
+                      size: 18, color: Colors.white.withOpacity(0.5)),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  '${_mo[_viewMonth.month - 1]} ${_viewMonth.year}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 14,
+                      fontWeight: FontWeight.w500, letterSpacing: 0.3),
+                ),
+              ),
+              GestureDetector(
+                onTap: _nextMonth,
+                child: Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(Icons.chevron_right,
+                      size: 18, color: Colors.white.withOpacity(0.5)),
+                ),
+              ),
+            ]),
+
+            const SizedBox(height: 14),
+
+            // ── Weekday headers ──
+            Row(
+              children: _wd.map((d) => Expanded(
+                child: Text(d,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 11, fontWeight: FontWeight.w600,
+                        color: Colors.white.withOpacity(0.2),
+                        letterSpacing: 0.5)),
+              )).toList(),
+            ),
+
+            const SizedBox(height: 6),
+
+            // ── Day grid ──
+            ...List.generate(rows, (row) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Row(
+                  children: List.generate(7, (col) {
+                    final cellIdx = row * 7 + col;
+                    final dayNum  = cellIdx - startOffset + 1;
+
+                    if (dayNum < 1 || dayNum > daysInMonth) {
+                      return const Expanded(child: SizedBox(height: 36));
+                    }
+
+                    final d        = DateTime(_viewMonth.year, _viewMonth.month, dayNum);
+                    final disabled = _isDisabled(d);
+                    final isFrom   = _isFrom(d);
+                    final isTo     = _isTo(d);
+                    final inRange  = _inRange(d);
+                    final today    = _isToday(d);
+                    final isEndpoint = isFrom || isTo;
+
+                    // Range highlight: full row strip behind the day circle
+                    final bool rangeLeft  = inRange && !isFrom && col > 0;
+                    final bool rangeRight = inRange && !isTo  && col < 6;
+
+                    return Expanded(
+                      child: GestureDetector(
+                        onTap: disabled ? null : () => _onDayTap(d),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // Range band
+                            if (inRange)
+                              Row(children: [
+                                Expanded(
+                                  child: Container(
+                                    height: 32,
+                                    color: rangeLeft
+                                        ? Colors.white.withOpacity(0.08)
+                                        : Colors.transparent,
+                                  ),
+                                ),
+                                Expanded(
+                                  child: Container(
+                                    height: 32,
+                                    color: rangeRight
+                                        ? Colors.white.withOpacity(0.08)
+                                        : Colors.transparent,
+                                  ),
+                                ),
+                              ]),
+                            // Day circle
+                            Container(
+                              width: 32, height: 32,
+                              decoration: BoxDecoration(
+                                color: isEndpoint
+                                    ? Colors.white
+                                    : Colors.transparent,
+                                shape: BoxShape.circle,
+                                border: today && !isEndpoint
+                                    ? Border.all(
+                                    color: Colors.white.withOpacity(0.25),
+                                    width: 1)
+                                    : null,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '$dayNum',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: isEndpoint
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                    color: isEndpoint
+                                        ? Colors.black
+                                        : disabled
+                                        ? Colors.white.withOpacity(0.15)
+                                        : inRange
+                                        ? Colors.white.withOpacity(0.9)
+                                        : today
+                                        ? Colors.white
+                                        : Colors.white.withOpacity(0.6),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                ),
+              );
+            }),
+
+            const SizedBox(height: 16),
+
+            // ── Hint + Apply ──
+            Row(children: [
+              Expanded(
+                child: Text(
+                  _pickingFrom ? 'Tap a start date' : 'Tap an end date',
+                  style: TextStyle(
+                      fontSize: 11, color: Colors.white.withOpacity(0.25)),
+                ),
+              ),
+              GestureDetector(
+                onTap: _canApply()
+                    ? () => Navigator.pop(
+                    context, DateTimeRange(start: _from!, end: _to!))
+                    : null,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: _canApply() ? Colors.white : Colors.white.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text('Apply',
+                      style: TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600,
+                        color: _canApply() ? Colors.black : Colors.white.withOpacity(0.2),
+                      )),
+                ),
+              ),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RangeChip extends StatelessWidget {
+  final String label, value;
+  final bool active;
+  final VoidCallback onTap;
+  const _RangeChip({
+    required this.label, required this.value,
+    required this.active, required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: active
+                ? Colors.white.withOpacity(0.08)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: active
+                  ? Colors.white.withOpacity(0.25)
+                  : Colors.white.withOpacity(0.08),
+            ),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label, style: TextStyle(
+                fontSize: 9, letterSpacing: 1,
+                fontWeight: FontWeight.w700,
+                color: Colors.white.withOpacity(active ? 0.5 : 0.25))),
+            const SizedBox(height: 2),
+            Text(value, style: TextStyle(
+                fontSize: 12, fontWeight: FontWeight.w500,
+                color: Colors.white.withOpacity(active ? 0.9 : 0.45))),
+          ]),
+        ),
       ),
     );
   }
@@ -578,12 +1027,11 @@ class AnalyticsScreen extends StatefulWidget {
 class _AnalyticsScreenState extends State<AnalyticsScreen>
     with WidgetsBindingObserver {
   bool _loading = true;
-  // options: 'current' | '3' | '6' | '12'
   String _view = 'current';
 
-  List<_MonthData> _months       = []; // for multi-month views
-  List<_WeekData>  _weeks        = []; // for current-month weekly view
-  int              _monthsInData = 0;  // how many months have data
+  List<_MonthData> _months       = [];
+  List<_WeekData>  _weeks        = [];
+  int              _monthsInData = 0;
   final Set<String> _selectedLines = {'__total__'};
   Set<String> _allCategories = {};
 
@@ -611,7 +1059,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       final now     = DateTime.now();
       final allCats = <String>{};
 
-      // Always load up to 12 months to know how many have data
       final allMonths = <_MonthData>[];
       for (var i = 11; i >= 0; i--) {
         final rawM = now.month - i;
@@ -627,10 +1074,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       }
       final monthsWithData = allMonths.where((m) => m.total > 0).length;
 
-      // Weekly data for current month
       final monthFrom = DateTime(now.year, now.month, 1).millisecondsSinceEpoch.toString();
       final monthTxns = await Repo.txns(from: monthFrom);
-      // Group into weeks: week 1 = days 1-7, week 2 = 8-14, week 3 = 15-21, week 4 = 22+
       final weekMap = <int, Map<String, double>>{1:{}, 2:{}, 3:{}, 4:{}};
       for (final t in monthTxns) {
         if (t['type'] != 'debit') continue;
@@ -647,7 +1092,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
         _WeekData(label: 'W4', cats: weekMap[4]!),
       ];
 
-      // Pick months to show based on _view, trim trailing empty months
       List<_MonthData> pool;
       switch (_view) {
         case '3':  pool = allMonths.sublist(9);  break;
@@ -655,16 +1099,15 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
         case '12': pool = allMonths;             break;
         default:   pool = [allMonths.last];      break;
       }
-      // Remove leading months with no data, keep all once data starts
       int firstWithData = pool.indexWhere((m) => m.total > 0);
       final months = firstWithData < 0 ? pool : pool.sublist(firstWithData);
 
       setState(() {
-        _months       = months;
-        _weeks        = weeks;
-        _monthsInData = monthsWithData;
+        _months        = months;
+        _weeks         = weeks;
+        _monthsInData  = monthsWithData;
         _allCategories = allCats;
-        _loading      = false;
+        _loading       = false;
       });
     } catch (_) {
       setState(() => _loading = false);
@@ -784,7 +1227,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                 scrollDirection: Axis.horizontal,
                 child: Row(
                   children: [
-                    // Total chip
                     _LineChip(
                       label: 'Total',
                       color: Colors.white,
@@ -797,7 +1239,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                       }),
                     ),
                     const SizedBox(width: 8),
-                    // Category chips
                     ..._allCategories.toList().asMap().entries.map((e) {
                       final colors = _pieColors();
                       final color  = colors[e.key % colors.length];
@@ -830,7 +1271,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
             const SizedBox(height: 12),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: _DailyBarsAsync(),
+              child: const _DailyBarsAsync(),
             ),
 
             // Category changes
@@ -947,7 +1388,7 @@ class _LinePainter extends CustomPainter {
   }
 
   void _paintWeekly(Canvas canvas, double w, double h, double padL, double padT) {
-    final pts = weeks; // always show all 4 weeks
+    final pts = weeks;
     if (pts.isEmpty) return;
 
     double maxVal = 0;
@@ -962,7 +1403,6 @@ class _LinePainter extends CustomPainter {
 
     _drawGrid(canvas, w, h, padL, padT, maxVal);
 
-    // X labels
     for (var i = 0; i < pts.length; i++) {
       final x  = pts.length == 1 ? padL + w / 2 : padL + i / (pts.length - 1) * w;
       final tp = TextPainter(
@@ -981,17 +1421,12 @@ class _LinePainter extends CustomPainter {
       if (vals.every((v) => v == 0)) return;
       final path = Path();
       bool penDown = false;
-      int lastNonZeroIdx = -1;
       for (var i = 0; i < vals.length; i++) {
-        if (vals[i] > 0) lastNonZeroIdx = i;
-      }
-      for (var i = 0; i < vals.length; i++) {
-        if (vals[i] == 0) { penDown = false; continue; } // lift pen on empty
+        if (vals[i] == 0) { penDown = false; continue; }
         final x = pts.length == 1 ? padL + w / 2 : padL + i / (pts.length - 1) * w;
         final y = padT + h - (vals[i] / maxVal).clamp(0, 1) * h;
         if (!penDown) { path.moveTo(x, y); penDown = true; }
         else path.lineTo(x, y);
-        // Dot on each non-zero point
         canvas.drawCircle(Offset(x, y), 3.0, Paint()..color = color);
       }
       canvas.drawPath(path, Paint()
@@ -1009,7 +1444,7 @@ class _LinePainter extends CustomPainter {
   }
 
   void _paintMonthly(Canvas canvas, double w, double h, double padL, double padT) {
-    final pts = months.where((m) => true).toList(); // show all, even empty
+    final pts = months;
     if (pts.length < 2) return;
 
     double maxVal = 0;
@@ -1125,7 +1560,10 @@ class _LineChip extends StatelessWidget {
   }
 }
 
-// Daily bars but async (loads its own data)
+// ══════════════════════════════════════════════════════════════════
+// DAILY BARS (async, category-aware)
+// ══════════════════════════════════════════════════════════════════
+
 class _DailyBarsAsync extends StatefulWidget {
   const _DailyBarsAsync();
   @override
@@ -1133,7 +1571,10 @@ class _DailyBarsAsync extends StatefulWidget {
 }
 
 class _DailyBarsAsyncState extends State<_DailyBarsAsync> {
-  Map<String, double> _daily = {};
+  Map<String, double>              _daily     = {};
+  Map<String, Map<String, double>> _dailyCats = {};
+  List<String>                     _allCats   = [];
+  final Set<String>                _selected  = {};
 
   @override
   void initState() {
@@ -1146,256 +1587,115 @@ class _DailyBarsAsyncState extends State<_DailyBarsAsync> {
     final weekFrom = DateTime(now.year, now.month, now.day - 6)
         .millisecondsSinceEpoch.toString();
     try {
-      final txns = await Repo.txns(from: weekFrom);
-      final daily = <String, double>{};
+      final txns   = await Repo.txns(from: weekFrom);
+      final daily  = <String, double>{};
+      final catMap = <String, Map<String, double>>{};
+      final catSet = <String>{};
+
       for (var i = 6; i >= 0; i--) {
         final d   = now.subtract(Duration(days: i));
         final key = '${d.day}/${d.month}';
-        daily[key] = 0;
+        daily[key]  = 0;
+        catMap[key] = {};
       }
+
       for (final t in txns) {
         if (t['type'] != 'debit') continue;
         final d   = DateTime.fromMillisecondsSinceEpoch(t['timestamp'] as int);
         final key = '${d.day}/${d.month}';
-        if (daily.containsKey(key)) {
-          daily[key] = (daily[key] ?? 0) + (t['amount'] as num).toDouble();
-        }
+        if (!daily.containsKey(key)) continue;
+        final amt = (t['amount'] as num).toDouble();
+        final cat = t['category'] as String? ?? 'Misc';
+        daily[key] = (daily[key] ?? 0) + amt;
+        catMap[key]![cat] = (catMap[key]![cat] ?? 0) + amt;
+        catSet.add(cat);
       }
-      setState(() => _daily = daily);
+
+      setState(() {
+        _daily     = daily;
+        _dailyCats = catMap;
+        _allCats   = catSet.toList();
+      });
     } catch (_) {}
   }
 
   @override
-  Widget build(BuildContext context) => _DailyBars(daily: _daily);
-}
-
-// ══════════════════════════════════════════════════════════════════
-// PIE CHART
-// ══════════════════════════════════════════════════════════════════
-
-class _PieSection extends StatelessWidget {
-  final Map<String, double> cats;
-  final double total;
-  final String? selected;
-  final ValueChanged<String> onSelect;
-
-  const _PieSection({required this.cats, required this.total,
-    required this.selected, required this.onSelect});
-
-  @override
   Widget build(BuildContext context) {
-    final colors  = _pieColors();
-    final entries = cats.entries.toList();
-
-    return LayoutBuilder(builder: (context, constraints) {
-      final canvasW = constraints.maxWidth;
-      return GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapUp: (details) {
-          final RenderBox box = context.findRenderObject() as RenderBox;
-          final local = box.globalToLocal(details.globalPosition);
-          const canvasH = 260.0;
-          final cx = canvasW / 2, cy = canvasH / 2;
-          final dx = local.dx - cx, dy = local.dy - cy;
-          final dist = math.sqrt(dx * dx + dy * dy);
-          if (dist < 50.0 || dist > 116.0) return;
-          var angle = math.atan2(dy, dx) + math.pi / 2;
-          if (angle < 0) angle += 2 * math.pi;
-          var start = 0.0;
-          for (var i = 0; i < entries.length; i++) {
-            final sweep = entries[i].value / total * 2 * math.pi;
-            if (angle >= start && angle < start + sweep) {
-              onSelect(entries[i].key);
-              return;
-            }
-            start += sweep;
-          }
-        },
-        child: SizedBox(
-          height: 290,
-          child: CustomPaint(
-            painter: _PiePainter(
-              cats: cats, total: total,
-              colors: colors, selected: selected,
-              canvasWidth: canvasW,
-            ),
-            size: Size(canvasW, 260),
-            child: Align(
-              // pie vertical centre is at 52% of canvas height
-              alignment: const Alignment(0.0, 0.08),
-              child: selected != null
-                  ? Text(
-                '${((cats[selected!] ?? 0) / total * 100).toStringAsFixed(1)}%',
-                style: const TextStyle(color: Colors.white,
-                    fontSize: 24, fontWeight: FontWeight.w200),
-              )
-                  : const SizedBox.shrink(),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Category chip row
+        if (_allCats.isNotEmpty)
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: _allCats.asMap().entries.map((e) {
+                final colors = _pieColors();
+                final color  = colors[e.key % colors.length];
+                final sel    = _selected.contains(e.value);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8, bottom: 12),
+                  child: _LineChip(
+                    label: e.value,
+                    color: color,
+                    selected: sel,
+                    onTap: () => setState(() {
+                      if (sel) _selected.remove(e.value);
+                      else     _selected.add(e.value);
+                    }),
+                  ),
+                );
+              }).toList(),
             ),
           ),
+        // Bar chart
+        _DailyBars(
+          daily:     _daily,
+          dailyCats: _dailyCats,
+          allCats:   _allCats,
+          selected:  _selected,
         ),
-      );
-    }); // LayoutBuilder
+      ],
+    );
   }
-}
-
-class _PiePainter extends CustomPainter {
-  final Map<String, double> cats;
-  final double total;
-  final List<Color> colors;
-  final String? selected;
-  final double canvasWidth;
-
-  _PiePainter({required this.cats, required this.total,
-    required this.colors, required this.selected, required this.canvasWidth});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final cx      = canvasWidth / 2;
-    final cy      = size.height * 0.52;
-    const outer   = 100.0;
-    const inner   = 60.0;
-    const expand  = 8.0;
-    const gap     = 0.018;
-    const margin  = 6.0; // min margin from screen edge
-    var   start   = -math.pi / 2;
-    final entries = cats.entries.toList();
-
-    for (var i = 0; i < entries.length; i++) {
-      final frac    = entries[i].value / total;
-      final sweep   = frac * 2 * math.pi - gap;
-      if (sweep <= 0) { start += frac * 2 * math.pi; continue; }
-      final color   = colors[i % colors.length];
-      final isSel   = selected == entries[i].key;
-      final mid     = start + sweep / 2;
-      final r       = isSel ? outer + expand : outer;
-
-      final paint = Paint()
-        ..color = isSel ? color : color.withOpacity(0.7)
-        ..style = PaintingStyle.fill;
-
-      final offX = isSel ? math.cos(mid) * expand : 0.0;
-      final offY = isSel ? math.sin(mid) * expand : 0.0;
-
-      final path = Path()
-        ..moveTo(cx + offX + inner * math.cos(start + gap / 2),
-            cy + offY + inner * math.sin(start + gap / 2))
-        ..arcTo(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: inner),
-            start + gap / 2, sweep, false)
-        ..arcTo(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: r),
-            start + sweep, -sweep, false)
-        ..close();
-
-      canvas.drawPath(path, paint);
-
-      _drawLabel(canvas, size, cx + offX, cy + offY, mid, r,
-          entries[i].key, frac, color, isSel,
-          '₹${_fmtLabel(entries[i].value)}',
-          canvasWidth, margin);
-
-      start += frac * 2 * math.pi;
-    }
-  }
-
-  void _drawLabel(Canvas canvas, Size size, double cx, double cy,
-      double mid, double outerR, String label, double frac,
-      Color color, bool isSel, String amount,
-      double canvasW, double margin) {
-    if (frac < 0.04) return;
-
-    const lineStart = 10.0;
-    const lineLen   = 20.0;
-    const dotR      = 2.0;
-    const maxLabelW = 68.0;
-
-    final x1 = cx + (outerR + lineStart) * math.cos(mid);
-    final y1 = cy + (outerR + lineStart) * math.sin(mid);
-    final x2 = cx + (outerR + lineStart + lineLen) * math.cos(mid);
-    final y2 = cy + (outerR + lineStart + lineLen) * math.sin(mid);
-
-    final linePaint = Paint()
-      ..color = color.withOpacity(isSel ? 0.9 : 0.4)
-      ..strokeWidth = 1.0
-      ..style = PaintingStyle.stroke;
-
-    canvas.drawLine(Offset(x1, y1), Offset(x2, y2), linePaint);
-    canvas.drawCircle(Offset(x2, y2), dotR,
-        Paint()..color = color.withOpacity(isSel ? 1.0 : 0.45));
-
-    final isRight = math.cos(mid) >= 0;
-
-    final namePainter = TextPainter(
-      text: TextSpan(text: label, style: TextStyle(
-        color: Colors.white.withOpacity(isSel ? 1.0 : 0.6),
-        fontSize: 10,
-        fontWeight: isSel ? FontWeight.w600 : FontWeight.normal,
-      )),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: maxLabelW);
-
-    final amtPainter = TextPainter(
-      text: TextSpan(text: amount, style: TextStyle(
-        color: Colors.white.withOpacity(isSel ? 0.7 : 0.35),
-        fontSize: 9,
-      )),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: maxLabelW);
-
-    final totalH = namePainter.height + 2 + amtPainter.height;
-    final startY = y2 - totalH / 2;
-
-    // Clamp x so label never goes outside screen edges
-    double nx, ax;
-    if (isRight) {
-      nx = x2 + dotR + 5;
-      ax = x2 + dotR + 5;
-      // Clamp right edge
-      final maxX = canvasW - margin;
-      if (nx + namePainter.width > maxX) nx = maxX - namePainter.width;
-      if (ax + amtPainter.width > maxX)  ax = maxX - amtPainter.width;
-    } else {
-      nx = x2 - dotR - 5 - namePainter.width;
-      ax = x2 - dotR - 5 - amtPainter.width;
-      // Clamp left edge
-      if (nx < margin) nx = margin;
-      if (ax < margin) ax = margin;
-    }
-
-    // Smart Y: clamp to canvas, prefer direction with more space
-    final labelH = namePainter.height + 2 + amtPainter.height;
-    final spaceAbove = y2;
-    final spaceBelow = size.height - y2;
-    double sy = y2 - labelH / 2; // centered default
-    if (sy < 4) {
-      // Not enough space above — shift down
-      sy = spaceBelow > spaceAbove ? y2 + 4 : 4.0;
-    } else if (sy + labelH > size.height - 4) {
-      // Not enough space below — shift up
-      sy = spaceAbove > spaceBelow ? y2 - labelH - 4 : size.height - labelH - 4;
-    }
-    sy = sy.clamp(4.0, size.height - labelH - 4);
-
-    namePainter.paint(canvas, Offset(nx, sy));
-    amtPainter.paint(canvas, Offset(ax, sy + namePainter.height + 2));
-  }
-
-  @override
-  bool shouldRepaint(_PiePainter old) =>
-      old.selected != selected || old.cats != cats;
 }
 
 class _DailyBars extends StatelessWidget {
-  final Map<String, double> daily;
-  const _DailyBars({required this.daily});
+  final Map<String, double>              daily;
+  final Map<String, Map<String, double>> dailyCats;
+  final List<String>                     allCats;
+  final Set<String>                      selected;
+
+  const _DailyBars({
+    required this.daily,
+    required this.dailyCats,
+    required this.allCats,
+    required this.selected,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final max = daily.values.fold(0.0, (a, b) => a > b ? a : b);
-    final days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    final now  = DateTime.now();
+    final showCats   = selected.isNotEmpty;
+    final activeCats = showCats ? allCats.where(selected.contains).toList() : <String>[];
+    final colors     = _pieColors();
+
+    double max = 0;
+    for (final entry in daily.entries) {
+      final val = showCats
+          ? activeCats.fold(0.0, (s, c) => s + (dailyCats[entry.key]?[c] ?? 0))
+          : entry.value;
+      if (val > max) max = val;
+    }
+    if (max == 0) max = 1;
+
+    final days    = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final now     = DateTime.now();
     final entries = daily.entries.toList();
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
+      // maxH(80) + label slot(16) + gap(8) + day label(12) + vert padding(16+16) = 148
+      height: 148,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
         color: const Color(0xFF1C1C1E),
         borderRadius: BorderRadius.circular(16),
@@ -1403,46 +1703,30 @@ class _DailyBars extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: entries.asMap().entries.map((e) {
-          final idx    = e.key;
-          final amount = e.value.value;
-          final pct    = max > 0 ? amount / max : 0.0;
-          final dayIdx = (now.weekday - 1 - (6 - idx)) % 7;
-          final label  = days[dayIdx.clamp(0, 6)];
+          final idx     = e.key;
+          final dayKey  = e.value.key;
           final isToday = idx == entries.length - 1;
+          final dayIdx  = (now.weekday - 1 - (6 - idx)) % 7;
+          final label   = days[dayIdx.clamp(0, 6)];
+          final total   = showCats
+              ? activeCats.fold(0.0, (s, c) => s + (dailyCats[dayKey]?[c] ?? 0))
+              : daily[dayKey] ?? 0;
 
           return Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (amount > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text('₹${_fmtShort(amount)}',
-                          style: TextStyle(
-                              color: Colors.white.withOpacity(0.3),
-                              fontSize: 8)),
-                    ),
-                  AnimatedContainer(
-                    duration: Duration(milliseconds: 300 + idx * 50),
-                    curve: Curves.easeOutCubic,
-                    height: 80 * pct + 4,
-                    decoration: BoxDecoration(
-                      color: isToday
-                          ? Colors.white.withOpacity(0.7)
-                          : Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(label, style: TextStyle(
-                      color: isToday
-                          ? Colors.white.withOpacity(0.7)
-                          : Colors.white.withOpacity(0.25),
-                      fontSize: 10,
-                      fontWeight: isToday ? FontWeight.w600 : FontWeight.normal)),
-                ],
+              child: _DailyBarColumn(
+                key: ValueKey(dayKey),
+                total:      total,
+                max:        max,
+                dayKey:     dayKey,
+                label:      label,
+                isToday:    isToday,
+                showCats:   showCats,
+                activeCats: activeCats,
+                allCats:    allCats,
+                dailyCats:  dailyCats,
+                colors:     colors,
               ),
             ),
           );
@@ -1450,6 +1734,455 @@ class _DailyBars extends StatelessWidget {
       ),
     );
   }
+}
+
+// Each bar column is stateful so TweenAnimationBuilder has stable identity
+// and correctly interpolates from its previous value on every rebuild.
+class _DailyBarColumn extends StatefulWidget {
+  final double              total;
+  final double              max;
+  final String              dayKey;
+  final String              label;
+  final bool                isToday;
+  final bool                showCats;
+  final List<String>        activeCats;
+  final List<String>        allCats;
+  final Map<String, Map<String, double>> dailyCats;
+  final List<Color>         colors;
+
+  const _DailyBarColumn({
+    super.key,
+    required this.total,
+    required this.max,
+    required this.dayKey,
+    required this.label,
+    required this.isToday,
+    required this.showCats,
+    required this.activeCats,
+    required this.allCats,
+    required this.dailyCats,
+    required this.colors,
+  });
+
+  @override
+  State<_DailyBarColumn> createState() => _DailyBarColumnState();
+}
+
+class _DailyBarColumnState extends State<_DailyBarColumn> {
+  static const maxH  = 80.0;
+  static const dur   = Duration(milliseconds: 350);
+  static const curve = Curves.easeOutCubic;
+
+  @override
+  Widget build(BuildContext context) {
+    final targetH = maxH * (widget.total / widget.max).clamp(0.0, 1.0);
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        // Fixed slot: bar + label live here, clipped so segments never overflow
+        ClipRect(
+          child: SizedBox(
+            height: maxH + 16, // 16px headroom for the floating label
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(end: targetH),
+              duration: dur,
+              curve: curve,
+              builder: (_, animH, __) {
+                return Stack(
+                  alignment: Alignment.bottomCenter,
+                  children: [
+                    // Bar (stacked or single)
+                    Positioned(
+                      bottom: 0, left: 0, right: 0,
+                      child: widget.showCats && widget.activeCats.length > 1
+                          ? _buildStacked(animH)
+                          : _buildSingle(animH),
+                    ),
+                    // Amount label tracks bar top
+                    if (widget.total > 0)
+                      Positioned(
+                        bottom: animH + 2,
+                        left: 0, right: 0,
+                        child: Text(
+                          '₹${_fmtShort(widget.total)}',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.3),
+                            fontSize: 8,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(widget.label, style: TextStyle(
+          color: widget.isToday
+              ? Colors.white.withOpacity(0.7)
+              : Colors.white.withOpacity(0.25),
+          fontSize: 10,
+          fontWeight: widget.isToday ? FontWeight.w600 : FontWeight.normal,
+        )),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  Widget _buildSingle(double animH) {
+    final barColor = (widget.showCats && widget.activeCats.isNotEmpty)
+        ? widget.colors[widget.allCats.indexOf(widget.activeCats.first) % widget.colors.length]
+        : Colors.white;
+    return Container(
+      height: animH,
+      decoration: BoxDecoration(
+        color: widget.isToday
+            ? barColor.withOpacity(0.7)
+            : barColor.withOpacity(0.25),
+        borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+
+  Widget _buildStacked(double animH) {
+    // Proportion each segment off the *target* total so ratios stay stable;
+    // the whole stack scales via animH.
+    return SizedBox(
+      width: double.infinity,
+      height: animH,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: widget.activeCats.asMap().entries.map((ce) {
+          final catAmt = widget.dailyCats[widget.dayKey]?[ce.value] ?? 0;
+          final segH   = widget.total > 0
+              ? (animH * (catAmt / widget.total)).clamp(0.0, animH)
+              : 0.0;
+          final catIdx = widget.allCats.indexOf(ce.value);
+          final color  = widget.colors[catIdx % widget.colors.length];
+          final isTop  = ce.key == 0;
+          return SizedBox(
+            width: double.infinity,
+            height: segH,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: widget.isToday
+                    ? color.withOpacity(0.85)
+                    : color.withOpacity(0.55),
+                borderRadius: isTop
+                    ? const BorderRadius.vertical(top: Radius.circular(4))
+                    : BorderRadius.zero,
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PIE CHART
+// ══════════════════════════════════════════════════════════════════
+
+class _PieSection extends StatefulWidget {
+  final Map<String, double> cats;
+  final double total;
+  final String? selected;
+  final ValueChanged<String> onSelect;
+
+  const _PieSection({super.key, required this.cats, required this.total,
+    required this.selected, required this.onSelect});
+
+  @override
+  State<_PieSection> createState() => _PieSectionState();
+}
+
+class _PieSectionState extends State<_PieSection>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 700));
+    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic);
+    _ctrl.forward();
+  }
+
+  @override
+  void didUpdateWidget(_PieSection old) {
+    super.didUpdateWidget(old);
+    if (old.cats != widget.cats) _ctrl.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors  = _pieColors();
+    final entries = widget.cats.entries.toList();
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final canvasW = constraints.maxWidth;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Donut ──
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapUp: (details) {
+              final box = context.findRenderObject() as RenderBox;
+              final local = box.globalToLocal(details.globalPosition);
+              const donutH = 220.0;
+              final cx = canvasW / 2, cy = donutH / 2;
+              final dx = local.dx - cx, dy = local.dy - cy;
+              final dist = math.sqrt(dx * dx + dy * dy);
+              if (dist < 52.0 || dist > 108.0) return;
+              var angle = math.atan2(dy, dx) + math.pi / 2;
+              if (angle < 0) angle += 2 * math.pi;
+              var start = 0.0;
+              for (var i = 0; i < entries.length; i++) {
+                final sweep = entries[i].value / widget.total * 2 * math.pi;
+                if (angle >= start && angle < start + sweep) {
+                  widget.onSelect(entries[i].key);
+                  return;
+                }
+                start += sweep;
+              }
+            },
+            child: SizedBox(
+              height: 220,
+              child: AnimatedBuilder(
+                animation: _anim,
+                builder: (_, __) => CustomPaint(
+                  painter: _PiePainter(
+                    cats: widget.cats,
+                    total: widget.total,
+                    colors: colors,
+                    selected: widget.selected,
+                    progress: _anim.value,
+                    canvasWidth: canvasW,
+                  ),
+                  size: Size(canvasW, 220),
+                  child: Center(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      child: widget.selected != null
+                          ? _PieCenter(
+                        key: ValueKey(widget.selected),
+                        pct: (widget.cats[widget.selected!] ?? 0) / widget.total,
+                      )
+                          : const _PieCenterTotal(
+                        key: ValueKey('__total__'),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ── Legend rows ──
+          // FIXED: bar width increased from 72 → 120 (longer, all equal length)
+          // FIXED: amount label shifted right via left padding inside its SizedBox
+          ...entries.asMap().entries.map((e) {
+            final color  = colors[e.key % colors.length];
+            final isSel  = widget.selected == e.value.key;
+            final isNone = widget.selected == null;
+            final pct    = e.value.value / widget.total;
+
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => widget.onSelect(e.value.key),
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 200),
+                opacity: (isNone || isSel) ? 1.0 : 0.3,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Row(children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: isSel ? 10 : 7,
+                      height: isSel ? 10 : 7,
+                      decoration: BoxDecoration(
+                          color: color, shape: BoxShape.circle),
+                    ),
+                    const SizedBox(width: 10),
+                    // Name — always same width so bar stays aligned
+                    Expanded(
+                      child: Text(e.value.key,
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(isSel ? 1.0 : 0.65),
+                            fontSize: 13,
+                            fontWeight: isSel ? FontWeight.w500 : FontWeight.w400,
+                          )),
+                    ),
+                    // Bar — FIXED: width 72 → 120 so bars are visibly longer & equal
+                    SizedBox(
+                      width: 120,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(2),
+                        child: LinearProgressIndicator(
+                          value: pct,
+                          minHeight: 2,
+                          backgroundColor: Colors.white.withOpacity(0.06),
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                              color.withOpacity(isSel ? 0.9 : 0.5)),
+                        ),
+                      ),
+                    ),
+                    // FIXED: increased gap from 12 → 20 to shift amount label right
+                    const SizedBox(width: 20),
+                    // Amount — fixed width, right-aligned
+                    SizedBox(
+                      width: 64,
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 180),
+                        child: Text(
+                          isSel && _fmtExact(e.value.value) != _fmt(e.value.value)
+                              ? '₹${_fmtExact(e.value.value)}'
+                              : '₹${_fmt(e.value.value)}',
+                          key: ValueKey(isSel && _fmtExact(e.value.value) != _fmt(e.value.value)),
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(isSel ? 0.85 : 0.4),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            );
+          }),
+          const SizedBox(height: 8),
+        ],
+      );
+    });
+  }
+}
+
+class _PieCenter extends StatelessWidget {
+  final double pct;
+  const _PieCenter({super.key, required this.pct});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      '${(pct * 100).toStringAsFixed(1)}%',
+      style: const TextStyle(
+          color: Colors.white, fontSize: 26, fontWeight: FontWeight.w200,
+          letterSpacing: -1),
+    );
+  }
+}
+
+class _PieCenterTotal extends StatelessWidget {
+  const _PieCenterTotal({super.key});
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+class _PiePainter extends CustomPainter {
+  final Map<String, double> cats;
+  final double total;
+  final List<Color> colors;
+  final String? selected;
+  final double progress;
+  final double canvasWidth;
+
+  _PiePainter({required this.cats, required this.total, required this.colors,
+    required this.selected, required this.progress, required this.canvasWidth});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx      = canvasWidth / 2;
+    final cy      = size.height / 2;
+    const outer   = 96.0;
+    const inner   = 58.0;
+    const expand  = 10.0;
+    const gap     = 0.022;
+    var   start   = -math.pi / 2;
+    final entries = cats.entries.toList();
+    final hasSel  = selected != null;
+
+    // Only apply gaps when there are multiple segments; a single segment
+    // (or one segment dominating 100%) should be a seamless full ring.
+    final isSingle = entries.length == 1;
+
+    for (var i = 0; i < entries.length; i++) {
+      final frac      = entries[i].value / total;
+      final full      = frac * 2 * math.pi;
+      final actualGap = isSingle ? 0.0 : gap;
+      final sweep     = (full * progress) - actualGap;
+      if (sweep <= 0) { start += full * progress; continue; }
+
+      final color   = colors[i % colors.length];
+      final isSel   = selected == entries[i].key;
+      final mid     = start + sweep / 2;
+      final expand_ = isSel ? expand : 0.0;
+      final offX    = math.cos(mid) * expand_;
+      final offY    = math.sin(mid) * expand_;
+      final r       = isSel ? outer + expand : outer;
+
+      final opacity = hasSel ? (isSel ? 1.0 : 0.28) : 0.88;
+      final paint   = Paint()
+        ..color = color.withOpacity(opacity)
+        ..style  = PaintingStyle.fill;
+
+      // For a full ring (single segment), use addOval+addOval with evenOdd
+      // so it's a perfect seamless donut with no path join artifacts.
+      if (isSingle) {
+        final path = Path()
+          ..addOval(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: r))
+          ..addOval(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: inner));
+        path.fillType = PathFillType.evenOdd;
+        canvas.drawPath(path, paint);
+        if (isSel) {
+          canvas.drawPath(path,
+              Paint()..color = Colors.white.withOpacity(0.07)..style = PaintingStyle.fill);
+        }
+        start += full * progress;
+        continue;
+      }
+
+      final path = Path()
+        ..moveTo(cx + offX + inner * math.cos(start + actualGap / 2),
+            cy + offY + inner * math.sin(start + actualGap / 2))
+        ..arcTo(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: inner),
+            start + actualGap / 2, sweep - actualGap / 2, false)
+        ..arcTo(Rect.fromCircle(center: Offset(cx + offX, cy + offY), radius: r),
+            start + sweep - actualGap / 2, -(sweep - actualGap / 2), false)
+        ..close();
+
+      canvas.drawPath(path, paint);
+
+      if (isSel) {
+        canvas.drawPath(path,
+            Paint()..color = Colors.white.withOpacity(0.07)..style = PaintingStyle.fill);
+      }
+
+      start += full * progress;
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PiePainter old) =>
+      old.selected != selected || old.cats != cats || old.progress != progress;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1464,7 +2197,7 @@ class _CatComparison extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isUp  = pct > 0;
+    final isUp    = pct > 0;
     final hasLast = lastAmount > 0;
 
     return Container(
@@ -1546,40 +2279,131 @@ class _CatRow extends StatelessWidget {
   }
 }
 
-class _EmptyDonut extends StatelessWidget {
+class _EmptyDonut extends StatefulWidget {
   const _EmptyDonut();
+  @override
+  State<_EmptyDonut> createState() => _EmptyDonutState();
+}
+
+class _EmptyDonutState extends State<_EmptyDonut>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    )..repeat(reverse: true);
+    _pulse = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 200,
-      child: Center(
-        child: CustomPaint(
-          painter: _EmptyDonutPainter(),
-          size: const Size(200, 200),
-        ),
-      ),
+      height: 220,
+      child: LayoutBuilder(builder: (_, constraints) {
+        final canvasW = constraints.maxWidth;
+        return AnimatedBuilder(
+          animation: _pulse,
+          builder: (_, __) => CustomPaint(
+            painter: _EmptyDonutPainter(pulse: _pulse.value, canvasWidth: canvasW),
+            size: Size(canvasW, 220),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.receipt_long_outlined,
+                      size: 18,
+                      color: Colors.white.withOpacity(0.12 + _pulse.value * 0.06)),
+                  const SizedBox(height: 6),
+                  Text('No data',
+                      style: TextStyle(
+                        fontSize: 11,
+                        letterSpacing: 0.5,
+                        color: Colors.white.withOpacity(0.18 + _pulse.value * 0.08),
+                        fontWeight: FontWeight.w400,
+                      )),
+                ],
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 }
 
 class _EmptyDonutPainter extends CustomPainter {
+  final double pulse;
+  final double canvasWidth;
+  const _EmptyDonutPainter({required this.pulse, required this.canvasWidth});
+
   @override
   void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2, cy = size.height / 2;
-    const outer = 90.0, inner = 54.0;
-    final paint = Paint()
-      ..color = Colors.white.withOpacity(0.08)
-      ..style = PaintingStyle.fill;
-    final path = Path()
+    final cx = canvasWidth / 2;   // matches _PiePainter: cx = canvasWidth / 2
+    final cy = size.height / 2;   // matches _PiePainter: cy = size.height / 2
+    const outer = 96.0, inner = 58.0;
+    const mid   = (outer + inner) / 2;
+    const thick = outer - inner; // full ring thickness
+
+    // ── Filled ring (very faint, pulses slightly) ──
+    final fillOpacity = 0.04 + pulse * 0.02;
+    final fillPath = Path()
       ..addOval(Rect.fromCircle(center: Offset(cx, cy), radius: outer))
       ..addOval(Rect.fromCircle(center: Offset(cx, cy), radius: inner));
-    path.fillType = PathFillType.evenOdd;
-    canvas.drawPath(path, paint);
+    fillPath.fillType = PathFillType.evenOdd;
+    canvas.drawPath(fillPath,
+        Paint()..color = Colors.white.withOpacity(fillOpacity)..style = PaintingStyle.fill);
+
+    // ── Dashed ring on the mid-radius ──
+    const dashCount  = 24;
+    const dashAngle  = (2 * math.pi) / dashCount;
+    const dashFrac   = 0.55; // fraction of each slot that is filled
+    final dashPaint  = Paint()
+      ..color       = Colors.white.withOpacity(0.10 + pulse * 0.06)
+      ..style       = PaintingStyle.stroke
+      ..strokeWidth = thick * 0.22
+      ..strokeCap   = StrokeCap.round;
+
+    for (var i = 0; i < dashCount; i++) {
+      final startAngle = i * dashAngle - math.pi / 2;
+      final sweepAngle = dashAngle * dashFrac;
+      canvas.drawArc(
+        Rect.fromCircle(center: Offset(cx, cy), radius: mid),
+        startAngle,
+        sweepAngle,
+        false,
+        dashPaint,
+      );
+    }
+
+    // ── Single bright arc accent (about 1/6 of the ring) that pulses position ──
+    final accentStart = -math.pi / 2 + pulse * math.pi * 0.4;
+    const accentSweep = math.pi / 3.2;
+    canvas.drawArc(
+      Rect.fromCircle(center: Offset(cx, cy), radius: mid),
+      accentStart,
+      accentSweep,
+      false,
+      Paint()
+        ..color       = Colors.white.withOpacity(0.20 + pulse * 0.12)
+        ..style       = PaintingStyle.stroke
+        ..strokeWidth = thick * 0.28
+        ..strokeCap   = StrokeCap.round,
+    );
   }
 
   @override
-  bool shouldRepaint(_EmptyDonutPainter old) => false;
+  bool shouldRepaint(_EmptyDonutPainter old) => old.pulse != pulse || old.canvasWidth != canvasWidth;
 }
 
 class _CatBars extends StatelessWidget {
@@ -1757,19 +2581,48 @@ List<Color> _pieColors() => const [
 ];
 
 String _fmt(double a) {
-  if (a >= 100000) return '${(a / 100000).toStringAsFixed(1)}L';
-  if (a >= 1000)   return '${(a / 1000).toStringAsFixed(1)}K';
+  if (a >= 100000) {
+    final v = a / 100000;
+    return '${v == v.truncate() ? v.toStringAsFixed(0) : v.toStringAsFixed(1)}L';
+  }
+  if (a >= 1000) {
+    final v = a / 1000;
+    return '${v == v.truncate() ? v.toStringAsFixed(0) : v.toStringAsFixed(1)}K';
+  }
   return a.toStringAsFixed(0);
 }
 
+// Exact amount formatted with commas: 2,340 or 1,23,456
+String _fmtExact(double a) {
+  final n = a.toStringAsFixed(0);
+  if (n.length <= 3) return n;
+  // Indian numbering: last 3 then groups of 2
+  final rev = n.split('').reversed.toList();
+  final buf = <String>[];
+  for (var i = 0; i < rev.length; i++) {
+    if (i == 3 || (i > 3 && (i - 3) % 2 == 0)) buf.add(',');
+    buf.add(rev[i]);
+  }
+  return buf.reversed.join();
+}
+
 String _fmtLabel(double a) {
-  if (a >= 100000) return (a / 100000).toStringAsFixed(1) + 'L';
-  if (a >= 1000) return (a / 1000).toStringAsFixed(1) + 'K';
+  if (a >= 100000) {
+    final v = a / 100000;
+    return '${v == v.truncate() ? v.toStringAsFixed(0) : v.toStringAsFixed(1)}L';
+  }
+  if (a >= 1000) {
+    final v = a / 1000;
+    return '${v == v.truncate() ? v.toStringAsFixed(0) : v.toStringAsFixed(1)}K';
+  }
   return a.toStringAsFixed(0);
 }
 
 String _fmtShort(double a) {
-  if (a >= 1000) return '${(a / 1000).toStringAsFixed(1)}K';
+  if (a >= 1000) {
+    final v = a / 1000;
+    return '${v == v.truncate() ? v.toStringAsFixed(0) : v.toStringAsFixed(1)}K';
+  }
   return a.toStringAsFixed(0);
 }
 
