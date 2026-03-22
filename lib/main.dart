@@ -43,9 +43,12 @@ class AppStore extends ChangeNotifier {
 
   // Pagination
   static const int pageSize = 20;
-  int  _txnOffset   = 0;
-  bool hasMore      = false;
-  bool loadingMore  = false;
+  int  _txnOffset    = 0;
+  bool hasMore       = false;
+  bool loadingMore   = false;
+
+  // Total unfiltered confirmed txn count — used for new-user scan button check
+  int totalTxnCount  = 0;
 
   // Increments on every refresh — used as AnimatedList key to force clean rebuild
   int txnGeneration = 0;
@@ -123,11 +126,13 @@ class AppStore extends ChangeNotifier {
     _txnOffset = 0; // reset pagination on refresh
 
     try {
-      final tFuture = Repo.txns(
+      final tFuture     = Repo.txns(
           from: from, to: to, category: selectedCategory,
           limit: pageSize, offset: 0);
-      final pFuture = Repo.txns(status: 'pending', limit: 200, offset: 0);
-      final cFuture = Repo.totals(from: from, to: to);
+      final pFuture     = Repo.txns(status: 'pending', limit: 200, offset: 0);
+      final cFuture     = Repo.totals(from: from, to: to);
+      // Unfiltered — only needs 4 rows to decide new-user scan button visibility
+      final totalFuture = Repo.txns(limit: 4, offset: 0);
 
       if (!homeOnly) {
         final List<_MonthData> months = [];
@@ -161,10 +166,12 @@ class AppStore extends ChangeNotifier {
       final t = await tFuture;
       final p = await pFuture;
       final c = await cFuture;
+      final total = await totalFuture;
 
       txns          = t;
       pending       = p;
       totals        = c;
+      totalTxnCount = total.length;
       hasMore       = t.length == pageSize;
       _txnOffset    = t.length;
       txnGeneration++;
@@ -766,7 +773,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
-      floatingActionButton: (!store.loading && txns.length < 4)
+      floatingActionButton: (!store.loading && store.totalTxnCount < 4)
           ? FloatingActionButton(
         onPressed: () => _showScanSheet(context),
         backgroundColor: const Color(0xFF1C1C1E),
